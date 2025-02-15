@@ -1,0 +1,30 @@
+{
+    "type": "module",
+    "dependencies": {
+        "@langchain/community": "^0.3.30",
+        "@langchain/core": "^0.3.40",
+        "@langchain/langgraph": "^0.2.46",
+        "@langchain/openai": "^0.4.4",
+        "mic": "^2.1.2",
+        "nodejs-whisper": "^0.2.6",
+        "openai": "^4.85.1",
+        "sound-play": "^1.1.0"
+    },
+    "name": "mirror-of-voice",
+    "version": "0.0.1",
+    "description": "test",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/TimaxLacs/mirror-of-voice.git"
+    },
+    "author": "",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/TimaxLacs/mirror-of-voice/issues"
+    },
+    "homepage": "https://github.com/TimaxLacs/mirror-of-voice#readme"
+}
