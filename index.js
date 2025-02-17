@@ -6,36 +6,52 @@ import { pipeline } from 'node:stream/promises'; // Use node: prefix for built-i
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import OpenAI from 'openai';
+import { ChatDeepSeek } from "@langchain/deepseek";
 import play from 'sound-play';
 import path from 'node:path'; // Use node: prefix for built-in modules
 import { tmpdir } from 'node:os'; // Add node: prefix
 import FormData from 'form-data';
 import { MemorySaver } from '@langchain/langgraph';
+
+
 const memory = new MemorySaver();
 
  
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY_MIR,
-  baseURL: `https://api.deep-foundation.tech/v1/`,
-});
+// const openai = new OpenAI({
+//   apiKey: process.env.OPENAI_API_KEY_MIR,
+//   baseURL: `https://api.deep-foundation.tech/v1/`,
+// });
 const SAMPLE_RATE = 16000; // Частота дискретизации аудио
 const SILENCE_TIMEOUT = 1500; // Таймаут тишины в миллисекундах
 const TEMP_DIR = tmpdir();
 
 
 
-const llmWithCustomURL = new ChatOpenAI({
-  model: "gpt-4o-mini",
-  temperature: 0.9,
-  configuration: {
-    baseURL: "https://api.deep-foundation.tech/v1/",
-  },
-  formatResponse: (response) => ({
-    content: response.choices[0].message.content,
-    additional_kwargs: {}
-  })
-});
+// const llm = new ChatOpenAI({
+//   model: "gpt-4o-mini",
+//   temperature: 0.9,
+//   configuration: {
+//     baseURL: "https://api.deep-foundation.tech/v1/",
+//   },
+//   formatResponse: (response) => ({
+//     content: response.choices[0].message.content,
+//     additional_kwargs: {}
+//   })
+// });
 
+
+
+
+
+const llm = new ChatDeepSeek({
+  model: "deepseek-chat",
+  apiKey: process.env.DEEPSEEK_API_KEY,
+  temperature: 0.9,
+  // formatResponse: (response) => ({
+  //   content: response.choices[0].message.content,
+  //   additional_kwargs: {}
+  // })
+});
 
 function createVoiceDetector() {
   let silenceTimer = null;
@@ -151,13 +167,11 @@ async function brainAppeal(text, threadId = 'default') {
   try {
     // const checkpoint = await memory.get({ configurable: { thread_id: threadId } });
     
-    // const messages = [
-    //   ...(checkpoint?.messages || []),
-    //   new HumanMessage(text)
-    // ];
-
-    const response = await llmWithCustomURL.invoke(text);
-
+    const messages = [
+      ...[],
+      new HumanMessage(text)
+    ];
+    const response = await llm.invoke(text);
     // Сохраняем обновленный контекст
     // await memory.put({
     //   configurable: { thread_id: threadId },
@@ -201,7 +215,7 @@ async function activation(threadId = 'default') {
       const response = await brainAppeal(text, threadId);
       console.log('Ответ:', response);
       
-      await voice(response);
+      // await voice(response);
       
       // Добавляем задержку перед следующей итерацией
       await new Promise(resolve => setTimeout(resolve, 500));

@@ -3,6 +3,7 @@
     "dependencies": {
         "@langchain/community": "^0.3.30",
         "@langchain/core": "^0.3.40",
+        "@langchain/deepseek": "^0.0.1",
         "@langchain/langgraph": "^0.2.46",
         "@langchain/openai": "^0.4.4",
         "form-data": "^4.0.2",
