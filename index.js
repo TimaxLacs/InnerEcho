@@ -7,12 +7,13 @@ import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import OpenAI from 'openai';
 import { ChatDeepSeek } from "@langchain/deepseek";
-import play from 'sound-play';
+// import play from 'sound-play';
 import path from 'node:path'; // Use node: prefix for built-in modules
 import { tmpdir } from 'node:os'; // Add node: prefix
 import FormData from 'form-data';
 import { MemorySaver } from '@langchain/langgraph';
-
+import request from 'request';
+import play from 'play-sound';
 
 const memory = new MemorySaver();
 
@@ -22,9 +23,9 @@ const memory = new MemorySaver();
 //   baseURL: `https://api.deep-foundation.tech/v1/`,
 // });
 const SAMPLE_RATE = 16000; // Частота дискретизации аудио
-const SILENCE_TIMEOUT = 1500; // Таймаут тишины в миллисекундах
+const SILENCE_TIMEOUT = 600; // Таймаут тишины в миллисекундах
 const TEMP_DIR = tmpdir();
-
+const player = play({ players: ['mpg123'] });
 
 
 // const llm = new ChatOpenAI({
@@ -188,18 +189,47 @@ async function brainAppeal(text, threadId = 'default') {
   }
 }
 
-async function voice(text) {
-  const mp3 = await openai.audio.speech.create({
-    model: "tts-1",
-    voice: "nova",
-    input: text,
-  });
+export async function voice(text) {
+  try {
+    const response = await fetch('https://api.goapi.ai/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GOAPI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: "tts-1",
+        input: text,
+        voice: "alloy",
+        response_format: "mp3",
+        speed: 1.0
+      })
+    });
 
-  const outputFile = path.join(TEMP_DIR, `response_${Date.now()}.mp3`);
-  const buffer = Buffer.from(await mp3.arrayBuffer());
-  await fs.promises.writeFile(outputFile, buffer);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+    }
 
-  await play.play(outputFile);
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const outputFile = path.join(TEMP_DIR, `response_${Date.now()}.mp3`);
+    await fs.promises.writeFile(outputFile, buffer);
+
+    // Воспроизведение аудиофайла с использованием выбранного плеера
+    await new Promise((resolve, reject) => {
+      player.play(outputFile, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    // Удаление временного файла после воспроизведения
+    await fs.promises.unlink(outputFile);
+  } catch (error) {
+    console.error('Ошибка генерации речи:', error);
+    throw error;
+  }
 }
 
 
@@ -215,7 +245,7 @@ async function activation(threadId = 'default') {
       const response = await brainAppeal(text, threadId);
       console.log('Ответ:', response);
       
-      // await voice(response);
+      await voice(response);
       
       // Добавляем задержку перед следующей итерацией
       await new Promise(resolve => setTimeout(resolve, 500));
