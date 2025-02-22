@@ -15,6 +15,8 @@ import { promisify } from 'node:util';
 
 const execAsync = promisify(exec);
 
+let executor;
+
 const SAMPLE_RATE = 16000;
 const SILENCE_TIMEOUT = 2000;
 const TEMP_DIR = tmpdir();
@@ -33,12 +35,11 @@ const customTool = new DynamicTool({
 const llm = new ChatOllama({
   model: "deepseek-r1:1.5b",
   baseUrl: "http://localhost:11434",
-  temperature: 0.7,
+  temperature: 0.1,
+  maxTokens: 100, // Увеличиваем до 100 для более длинных ответов
 });
 
-let executor;
-
-// Настройка агента
+// Настройка агента (оставляем для возможного будущего использования)
 async function setupAgent() {
   const prompt = await pull("hwchase17/react");
   const agent = await createReactAgent({
@@ -152,7 +153,7 @@ async function convertToWav(audioBufferOrPath) {
 // Транскрипция аудио с помощью локальной модели Whisper
 async function transcribe(audioBufferOrPath) {
   const wavFile = await convertToWav(audioBufferOrPath);
-  const textFile = `${wavFile}.txt`; // Файл, куда Whisper сохраняет результат
+  const textFile = `${wavFile}.txt`;
   try {
     const result = await nodewhisper(wavFile, {
       modelName: 'base',
@@ -163,33 +164,41 @@ async function transcribe(audioBufferOrPath) {
         language: 'ru',
       },
     });
-    // Проверяем, есть ли результат в result.text
     if (result.text) {
       return result.text;
     }
-    // Если result.text пустой, читаем из файла .txt
     const transcribedText = await fs.readFile(textFile, 'utf8');
     return transcribedText.trim() || "Ошибка: транскрипция не удалась";
   } catch (err) {
     console.error('Ошибка транскрипции:', err);
     return "Ошибка: транскрипция не удалась";
   } finally {
-    // Удаляем временный текстовый файл, если он существует
     await fs.unlink(textFile).catch(() => {});
   }
 }
 
-// Получение ответа от агента DeepSeek
+// Получение ответа от DeepSeek в режиме стриминга
 async function brainAppeal(text) {
   if (!text || text === "Ошибка: транскрипция не удалась") {
     return "Извините, не удалось распознать речь.";
   }
-  console.log(executor, 'executor')
-  const result = await executor.invoke({ input: text });
-  return result.output;
+
+  console.log('Используем стриминг для ответа');
+  const prompt = [
+    { role: "system", content: "Отвечай кратко и по делу, без лишних рассуждений." },
+    { role: "user", content: text }
+  ];
+  const stream = await llm.stream(prompt);
+  let fullResponse = "";
+  for await (const chunk of stream) {
+    fullResponse += chunk.content;
+    process.stdout.write(chunk.content);
+  }
+  console.log('\nСтриминг завершен');
+  return fullResponse.trim();
 }
 
-// Синтез и воспроизведение ответа (через API)
+// Синтез и воспроизведение ответа
 async function voice(text) {
   const response = await fetch('https://api.goapi.ai/v1/audio/speech', {
     method: 'POST',
@@ -217,19 +226,34 @@ async function voice(text) {
   await fs.unlink(outputFile);
 }
 
-// Основной цикл
+// Основной цикл с поддержкой стриминга
 async function mainLoop() {
   await setupAgent();
   while (true) {
     try {
-      // Для тестов в Gitpod используем заглушку
-      const audio = "/workspace/InnerEcho/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
+      const audio = "/workspace/InnerEcho/voice_sample.wav";
       // const audio = await listen(); // Раскомментируйте для реальной записи
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
-      const response = await brainAppeal(text);
-      console.log('Ответ AI:', response);
-      await voice(response);
+
+      // Стриминг для любого текста
+      const prompt = [
+        { role: "system", content: "Отвечай кратко и по делу, без лишних рассуждений." },
+        { role: "user", content: text }
+      ];
+      const stream = await llm.stream(prompt);
+      let accumulatedText = "";
+      for await (const chunk of stream) {
+        accumulatedText += chunk.content;
+        process.stdout.write(chunk.content);
+        if (accumulatedText.length > 50) { // Отправляем на TTS каждые 50 символов
+          await voice(accumulatedText);
+          accumulatedText = "";
+        }
+      }
+      console.log('\nСтриминг завершен');
+      if (accumulatedText) await voice(accumulatedText); // Воспроизводим остаток
+
       await new Promise(resolve => setTimeout(resolve, 500));
     } catch (err) {
       console.error('Ошибка в главном цикле:', err);
