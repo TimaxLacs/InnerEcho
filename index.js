@@ -33,7 +33,7 @@ const customTool = new DynamicTool({
 const llm = new ChatOllama({
   model: "deepseek-r1:1.5b",
   baseUrl: "http://localhost:11434",
-  temperature: 0.7,
+  temperature: 0.1,
 });
 
 let executor;
@@ -184,9 +184,14 @@ async function brainAppeal(text) {
   if (!text || text === "Ошибка: транскрипция не удалась") {
     return "Извините, не удалось распознать речь.";
   }
-  console.log(executor, 'executor')
-  const result = await executor.invoke({ input: text });
-  return result.output;
+
+  console.log('Генерируем ответ...');
+  const prompt = [
+    { role: "system", content: "Отвечай кратко и по делу, без лишних рассуждений." },
+    { role: "user", content: text }
+  ];
+  const response = await llm.invoke(prompt);
+  return response.content;
 }
 
 // Синтез и воспроизведение ответа (через API)
@@ -223,7 +228,7 @@ async function mainLoop() {
   while (true) {
     try {
       // Для тестов в Gitpod используем заглушку
-      const audio = "/workspace/InnerEcho/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
+      const audio = "/workspace/InnerEcho/test/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
       // const audio = await listen(); // Раскомментируйте для реальной записи
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
