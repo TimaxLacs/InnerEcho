@@ -12,12 +12,13 @@ import { AgentExecutor } from "langchain/agents";
 import { DynamicTool } from "@langchain/core/tools";
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import axios from 'axios';
+import FormData from 'form-data';
 
 const execAsync = promisify(exec);
 
 const SAMPLE_RATE = 16000;
 const SILENCE_TIMEOUT = 2000;
-const TEMP_DIR = tmpdir();
 const player = play({ players: ['mpg123'] });
 
 // Кастомный инструмент для агента (заглушка)
@@ -131,13 +132,13 @@ async function listen() {
 
 // Конвертация аудио в WAV
 async function convertToWav(audioBufferOrPath) {
-  const tempOutputFile = path.join(TEMP_DIR, `converted_${Date.now()}.wav`);
+  const tempOutputFile = path.join(process.cwd(), `converted_${Date.now()}.wav`);
   let ffmpegCommand;
 
   if (typeof audioBufferOrPath === 'string') {
     ffmpegCommand = `ffmpeg -i "${audioBufferOrPath}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
   } else {
-    const tempInputFile = path.join(TEMP_DIR, `raw_${Date.now()}.pcm`);
+    const tempInputFile = path.join(process.cwd(), `raw_${Date.now()}.pcm`);
     await fs.writeFile(tempInputFile, audioBufferOrPath);
     ffmpegCommand = `ffmpeg -f s16le -ar ${SAMPLE_RATE} -ac 1 -i "${tempInputFile}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
     await execAsync(ffmpegCommand);
@@ -163,18 +164,15 @@ async function transcribe(audioBufferOrPath) {
         language: 'ru',
       },
     });
-    // Проверяем, есть ли результат в result.text
     if (result.text) {
       return result.text;
     }
-    // Если result.text пустой, читаем из файла .txt
     const transcribedText = await fs.readFile(textFile, 'utf8');
     return transcribedText.trim() || "Ошибка: транскрипция не удалась";
   } catch (err) {
     console.error('Ошибка транскрипции:', err);
     return "Ошибка: транскрипция не удалась";
   } finally {
-    // Удаляем временный текстовый файл, если он существует
     await fs.unlink(textFile).catch(() => {});
   }
 }
@@ -194,32 +192,30 @@ async function brainAppeal(text) {
   return response.content;
 }
 
-// Синтез и воспроизведение ответа (через API)
+// Синтез и воспроизведение ответа через локальный TTS-сервер
 async function voice(text) {
-  const response = await fetch('https://api.goapi.ai/v1/audio/speech', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.GOAPI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: "tts-1",
-      input: text,
-      voice: "alloy",
-      response_format: "mp3",
-      speed: 1.3
-    })
-  });
+  const form = new FormData();
+  form.append('text', text);
+  form.append('reference_audio_path', 'reference.wav'); // Файл с образцом вашего голоса
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const outputFile = path.join(TEMP_DIR, `response_${Date.now()}.mp3`);
-  await fs.writeFile(outputFile, buffer);
+  try {
+    const response = await axios.post('http://localhost:5000/tts', form, {
+      headers: form.getHeaders(),
+      responseType: 'arraybuffer'
+    });
+    const buffer = Buffer.from(response.data);
+    const outputFile = path.join(process.cwd(), `response_${Date.now()}.wav`); // Сохранение в текущей директории
+    await fs.writeFile(outputFile, buffer);
 
-  await new Promise((resolve, reject) => {
-    player.play(outputFile, (err) => err ? reject(err) : resolve());
-  });
+    await new Promise((resolve, reject) => {
+      player.play(outputFile, (err) => err ? reject(err) : resolve());
+    });
 
-  await fs.unlink(outputFile);
+    console.log(`Аудиофайл сохранен: ${outputFile}`);
+    // Файл не удаляется
+  } catch (error) {
+    console.error('Ошибка при генерации речи:', error.message);
+  }
 }
 
 // Основной цикл
@@ -227,9 +223,9 @@ async function mainLoop() {
   await setupAgent();
   while (true) {
     try {
-      // Для тестов в Gitpod используем заглушку
-      const audio = "/workspace/InnerEcho/test/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
-      // const audio = await listen(); // Раскомментируйте для реальной записи
+      // Для тестов используем заглушку
+      // const audio = "/workspace/InnerEcho/test/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
+      const audio = await listen(); // Раскомментируйте для реальной записи
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
       const response = await brainAppeal(text);
