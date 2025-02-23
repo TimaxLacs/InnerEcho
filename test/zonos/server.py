@@ -1,68 +1,66 @@
-import os
 import io
+import logging
 import torch
 import torchaudio
 from zonos.model import Zonos
 from zonos.conditioning import make_cond_dict
-import soundfile as sf
-from flask import Flask, request, send_file
+from fastapi import FastAPI, Form
+from fastapi.responses import StreamingResponse
+from functools import lru_cache
+from langdetect import detect, DetectorFactory
+from typing import Optional
 
-app = Flask(__name__)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Путь для временных файлов
-TEMP_DIR = "/tmp"
-
-# Установка устройства и загрузка модели при старте
+DetectorFactory.seed = 0
+app = FastAPI()
 DEVICE = "cpu"  # Замените на "cuda" для GPU
 MODEL = Zonos.from_pretrained("Zyphra/Zonos-v0.1-transformer", device=DEVICE)
 
-def generate_speech(text, reference_audio_path=None):
-    """
-    Генерация речи с использованием zyphra/zonos.
-    Модель загружена глобально, что ускоряет обработку.
-    """
-    output_path = os.path.join(TEMP_DIR, "output.wav")
-    
-    if reference_audio_path and os.path.exists(reference_audio_path):
-        # Быстрая загрузка референсного аудио
-        wav, sampling_rate = torchaudio.load(reference_audio_path, normalize=True)
-        speaker = MODEL.make_speaker_embedding(wav, sampling_rate)
-        
-        # Подготовка условий для синтеза с клонированием
-        cond_dict = make_cond_dict(text=text, speaker=speaker, language="ru")
-    else:
-        # Синтез без клонирования
-        cond_dict = make_cond_dict(text=text, language="ru")
-    
-    # Подготовка и генерация
+@lru_cache(maxsize=100)
+def generate_speech_cached(text: str, language: str, speaker_embedding: Optional[str] = None):
+    return generate_speech(text, language, speaker_embedding)
+
+def generate_speech(text: str, language: str, speaker_embedding: Optional[str] = None):
+    logger.info(f"Generating speech for text: {text}, language: {language}")
+    cond_dict = make_cond_dict(text=text, speaker=speaker_embedding, language=language)
     conditioning = MODEL.prepare_conditioning(cond_dict)
-    with torch.no_grad():  # Отключаем градиенты для скорости
+    with torch.no_grad():
         codes = MODEL.generate(conditioning)
         wavs = MODEL.autoencoder.decode(codes).cpu()
-    
-    # Минимизация операций с диском: пишем напрямую в память
     audio_buffer = io.BytesIO()
     torchaudio.save(audio_buffer, wavs[0], MODEL.autoencoder.sampling_rate, format="wav")
     audio_buffer.seek(0)
-    
+    logger.info("Speech generated successfully")
     return audio_buffer
 
-@app.route('/tts', methods=['POST'])
-def tts_endpoint():
-    text = request.form.get('text')
-    reference_audio_path = request.form.get('reference_audio_path')
-    
-    if not text:
-        return "Text is required", 400
-    
-    # Генерация аудио
-    audio_buffer = generate_speech(text, reference_audio_path)
-    
-    # Отправка без лишних копирований
-    return send_file(audio_buffer, mimetype='audio/wav', as_attachment=True, download_name='output.wav')
-
-if __name__ == '__main__':
-    os.makedirs(TEMP_DIR, exist_ok=True)
-    # Увеличиваем производительность Flask с помощью gunicorn
-    print("Сервер запущен на http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, threaded=True)  # threaded=True для параллельных запросов 
+@app.post("/tts")
+async def tts_endpoint(
+    text: str = Form(...), reference_audio_path: Optional[str] = Form(None),
+    language: Optional[str] = Form(None)
+):
+    if not language:
+        try:
+            language = detect(text)
+            logger.info(f"Detected language: {language}")
+        except Exception as e:
+            logger.warning(f"Language detection failed: {e}")
+            language = "en-us"
+    speaker_embedding = None
+    if reference_audio_path:
+        try:
+            wav, sr = torchaudio.load(reference_audio_path, normalize=True)
+            speaker_embedding = MODEL.make_speaker_embedding(wav, sr)
+            logger.info(f"Speaker embedding generated from {reference_audio_path}")
+        except Exception as e:
+            logger.error(f"Failed to load reference audio: {e}")
+            return {"error": "Failed to load reference audio"}
+    try:
+        audio_buffer = generate_speech_cached(text, language, speaker_embedding)
+        return StreamingResponse(audio_buffer, media_type="audio/wav", 
+                                 headers={"Content-Disposition": "attachment; filename=output.wav"})
+    except Exception as e:
+        logger.error(f"Speech generation failed: {e}")
+        return {"error": "Speech generation failed"}

@@ -2,20 +2,16 @@ import axios from 'axios';
 import FormData from 'form-data';
 import fs from 'fs';
 
-async function tts(text, referenceAudioPath) {
+async function tts(text, referenceAudioPath = null, language = null) {
     const form = new FormData();
     form.append('text', text);
-    if (referenceAudioPath) {
-        form.append('reference_audio_path', referenceAudioPath); // Передаем путь к файлу
-    }
+    if (referenceAudioPath) form.append('reference_audio_path', referenceAudioPath);
+    if (language) form.append('language', language);
 
     try {
         const response = await axios.post('http://localhost:5000/tts', form, {
-            headers: form.getHeaders(),
-            responseType: 'arraybuffer'
+            headers: form.getHeaders(), responseType: 'arraybuffer'
         });
-        
-        // Сохранение результата
         fs.writeFileSync('output.wav', response.data);
         console.log('Аудио сохранено в output.wav');
     } catch (error) {
@@ -23,9 +19,5 @@ async function tts(text, referenceAudioPath) {
     }
 }
 
-// Использование через командную строку ffmpeg -i voice_sample.wav -ac 1 -ar 22050 zonos/reference.wav
 const args = process.argv.slice(2);
-const text = args[0] || 'Привет, мир! Меня зовут Тимур. Я - это ты.';
-const referenceAudioPath = args[1];
-
-tts(text, referenceAudioPath);
+tts(args[0] || 'Привет, мир!', args[1] || null, args[2] || null);
