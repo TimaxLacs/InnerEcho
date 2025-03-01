@@ -1,7 +1,6 @@
 import { Transform } from 'node:stream';
 import mic from 'mic';
 import fs from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import play from 'play-sound';
 import { nodewhisper } from 'nodejs-whisper';
@@ -12,25 +11,25 @@ import { AgentExecutor } from "langchain/agents";
 import { DynamicTool } from "@langchain/core/tools";
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import axios from 'axios';
-import FormData from 'form-data';
+import ZonosJS from 'zonosjs';
+import { fileURLToPath } from 'url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execAsync = promisify(exec);
 
 const SAMPLE_RATE = 16000;
 const SILENCE_TIMEOUT = 2000;
 const player = play({ players: ['mpg123'] });
+const zonosClient = new ZonosJS();
 
 // Кастомный инструмент для агента (заглушка)
 const customTool = new DynamicTool({
-  name: "custom_search",
-  description: "Поиск информации (заглушка)",
-  func: async (input) => {
-    return `Результат поиска для "${input}": Здесь могла быть полезная информация`;
-  },
+  name: "semantic",
+  description: "запрос к пакету семантики (заглушка)",
+  func: async (input) => `Результат поиска для "${input}"`,
 });
 
-// Инициализация модели DeepSeek через Ollama
+
 const llm = new ChatOllama({
   model: "deepseek-r1:1.5b",
   baseUrl: "http://localhost:11434",
@@ -54,7 +53,7 @@ async function setupAgent() {
   });
 }
 
-// Детектор активности голоса (VAD)
+
 function createVoiceDetector() {
   let silenceTimer = null;
   const vad = new Transform({
@@ -86,7 +85,7 @@ function createVoiceDetector() {
   return vad;
 }
 
-// Слушаем микрофон
+
 async function listen() {
   return new Promise((resolve, reject) => {
     const micInstance = mic({
@@ -104,20 +103,14 @@ async function listen() {
 
     audioStream
       .pipe(vad)
-      .on('data', chunk => {
-        audioChunks.push(chunk);
-      })
+      .on('data', chunk => audioChunks.push(chunk))
       .on('error', reject);
 
-    vad.on('silence', () => {
-      micInstance.stop();
-    });
+    vad.on('silence', () => micInstance.stop());
 
     audioStream
       .on('startComplete', () => console.log('🎤 Слушаю...'))
-      .on('stopComplete', () => {
-        resolve(Buffer.concat(audioChunks));
-      });
+      .on('stopComplete', () => resolve(Buffer.concat(audioChunks)));
 
     const timeout = setTimeout(() => {
       micInstance.stop();
@@ -125,35 +118,50 @@ async function listen() {
     }, 30000);
 
     micInstance.start();
-
     audioStream.on('stopComplete', () => clearTimeout(timeout));
   });
 }
 
-// Конвертация аудио в WAV
-async function convertToWav(audioBufferOrPath) {
+
+async function convertToWav(audioInput) {
   const tempOutputFile = path.join(process.cwd(), `converted_${Date.now()}.wav`);
   let ffmpegCommand;
 
-  if (typeof audioBufferOrPath === 'string') {
-    ffmpegCommand = `ffmpeg -i "${audioBufferOrPath}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
+  if (typeof audioInput === 'string') {
+    // Если входной параметр — путь к файлу
+    ffmpegCommand = `ffmpeg -i "${audioInput}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
   } else {
+    // Если входной параметр — буфер
     const tempInputFile = path.join(process.cwd(), `raw_${Date.now()}.pcm`);
-    await fs.writeFile(tempInputFile, audioBufferOrPath);
+    await fs.writeFile(tempInputFile, audioInput);
     ffmpegCommand = `ffmpeg -f s16le -ar ${SAMPLE_RATE} -ac 1 -i "${tempInputFile}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
     await execAsync(ffmpegCommand);
     await fs.unlink(tempInputFile);
     return tempOutputFile;
   }
 
-  await execAsync(ffmpegCommand);
-  return tempOutputFile;
+  try {
+    await execAsync(ffmpegCommand);
+    // Проверяем длительность файла
+    const durationCheck = await execAsync(`ffprobe -i "${tempOutputFile}" -show_entries format=duration -v quiet -of csv="p=0"`);
+    const duration = parseFloat(durationCheck.stdout);
+    if (duration < 1) {
+      // Добавляем 1 секунду тишины в конец, если файл короче 1 секунды
+      const paddedFile = path.join(process.cwd(), `padded_${Date.now()}.wav`);
+      await execAsync(`ffmpeg -i "${tempOutputFile}" -af "apad=pad_dur=1" -ar 16000 -ac 1 "${paddedFile}" -y`);
+      await fs.unlink(tempOutputFile);
+      return paddedFile;
+    }
+    return tempOutputFile;
+  } catch (err) {
+    console.error('Ошибка конвертации:', err);
+    throw err;
+  }
 }
 
-// Транскрипция аудио с помощью локальной модели Whisper
-async function transcribe(audioBufferOrPath) {
-  const wavFile = await convertToWav(audioBufferOrPath);
-  const textFile = `${wavFile}.txt`; // Файл, куда Whisper сохраняет результат
+async function transcribe(audioBuffer) {
+  const wavFile = await convertToWav(audioBuffer);
+  const textFile = `${wavFile}.txt`;
   try {
     const result = await nodewhisper(wavFile, {
       modelName: 'base',
@@ -164,9 +172,7 @@ async function transcribe(audioBufferOrPath) {
         language: 'ru',
       },
     });
-    if (result.text) {
-      return result.text;
-    }
+    if (result.text) return result.text;
     const transcribedText = await fs.readFile(textFile, 'utf8');
     return transcribedText.trim() || "Ошибка: транскрипция не удалась";
   } catch (err) {
@@ -177,12 +183,11 @@ async function transcribe(audioBufferOrPath) {
   }
 }
 
-// Получение ответа от агента DeepSeek
+// Получение ответа от DeepSeek
 async function brainAppeal(text) {
   if (!text || text === "Ошибка: транскрипция не удалась") {
     return "Извините, не удалось распознать речь.";
   }
-
   console.log('Генерируем ответ...');
   const prompt = [
     { role: "system", content: "Отвечай кратко и по делу, без лишних рассуждений." },
@@ -192,43 +197,48 @@ async function brainAppeal(text) {
   return response.content;
 }
 
-// Синтез и воспроизведение ответа через локальный TTS-сервер
 async function voice(text) {
-  const form = new FormData();
-  form.append('text', text);
-  form.append('reference_audio_path', 'reference.wav'); // Файл с образцом вашего голоса
-
+  console.log('Начинаем генерацию речи для текста:', text);
   try {
-    const response = await axios.post('http://localhost:5000/tts', form, {
-      headers: form.getHeaders(),
-      responseType: 'arraybuffer'
-    });
-    const buffer = Buffer.from(response.data);
-    const outputFile = path.join(process.cwd(), `response_${Date.now()}.wav`); // Сохранение в текущей директории
-    await fs.writeFile(outputFile, buffer);
+    console.log('Отправляем запрос к ZonosJS...');
+    const audioBuffer = await zonosClient.generateSpeech(text, './reference.wav', 'ru');
+    console.log('Аудио получено, размер буфера:', audioBuffer.length);
 
+    const audioDir = path.join(__dirname, 'audio');
+    await fs.mkdir(audioDir, { recursive: true }).catch(() => {}); 
+
+    const outputFile = path.join(audioDir, `response_${Date.now()}.wav`);
+    console.log('Сохраняем файл:', outputFile);
+    await fs.writeFile(outputFile, audioBuffer);
+    console.log('Файл сохранён');
+
+    console.log('Воспроизводим аудио...');
     await new Promise((resolve, reject) => {
-      player.play(outputFile, (err) => err ? reject(err) : resolve());
+      player.play(outputFile, (err) => {
+        if (err) {
+          console.error('Ошибка воспроизведения:', err);
+          reject(err);
+        } else {
+          console.log('Воспроизведение завершено');
+          resolve();
+        }
+      });
     });
-
-    console.log(`Аудиофайл сохранен: ${outputFile}`);
-    // Файл не удаляется
   } catch (error) {
-    console.error('Ошибка при генерации речи:', error.message);
+    console.error('Ошибка в voice:', error.message);
   }
 }
 
-// Основной цикл
 async function mainLoop() {
   await setupAgent();
   while (true) {
     try {
-      // Для тестов используем заглушку
-      // const audio = "/workspace/InnerEcho/test/audio_2025-02-22_09-29-56.wav"; // Замените на ваш файл
-      const audio = await listen(); // Раскомментируйте для реальной записи
+      const audio = await listen();
+      // const audio = "/workspace/InnerEcho/reference.wav";
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
       const response = await brainAppeal(text);
+      // const response = "привет"
       console.log('Ответ AI:', response);
       await voice(response);
       await new Promise(resolve => setTimeout(resolve, 500));

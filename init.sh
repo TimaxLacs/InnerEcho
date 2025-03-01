@@ -10,7 +10,7 @@ log() { echo -e "${GREEN}[INFO]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 log "Установка системных зависимостей"
-sudo apt update && sudo apt install -y ffmpeg mpg123 curl espeak-ng git python3-dev
+sudo apt update && sudo apt install -y ffmpeg mpg123 curl git python3 python3-venv python3-pip
 
 log "Установка Node.js (если не установлен)"
 if ! command -v node &> /dev/null; then
@@ -19,27 +19,9 @@ if ! command -v node &> /dev/null; then
 fi
 
 log "Установка JavaScript зависимостей..."
-npm install mic play-sound @langchain/ollama @langchain/core langchain nodejs-whisper axios form-data
+npm install mic play-sound @langchain/ollama @langchain/core langchain nodejs-whisper zonosjs
 
 npx nodejs-whisper download
-
-log "Настройка Python виртуального окружения"
-if [ ! -d ".venv" ]; then
-  python3 -m venv .venv || error "Не удалось создать виртуальное окружение"
-fi
-source .venv/bin/activate
-
-log "Установка uv (если не установлен)"
-pip install -U uv
-
-log "Клонирование и установка Zonos из GitHub"
-if [ ! -d "Zonos" ]; then
-  git clone https://github.com/Zyphra/Zonos.git || error "Не удалось клонировать Zonos"
-fi
-cd Zonos
-uv pip install -e . || error "Не удалось установить Zonos"
-uv pip install fastapi uvicorn torch torchaudio soundfile numpy langdetect || error "Не удалось установить зависимости Zonos"
-cd ..
 
 log "Проверка Ollama..."
 if ! command -v ollama &> /dev/null; then
@@ -53,7 +35,7 @@ log "Проверка работы Ollama сервера..."
 if ! curl -s http://localhost:11434 > /dev/null; then
   log "Ollama сервер не запущен, запускаем в фоне..."
   nohup ollama serve > ollama.log 2>&1 &
-  sleep 5 # Даем время серверу запуститься
+  sleep 5
   curl -s http://localhost:11434 > /dev/null || error "Не удалось запустить Ollama сервер"
 else
   log "Ollama сервер уже работает"
@@ -67,20 +49,39 @@ else
   log "Модель deepseek-r1:1.5b уже установлена"
 fi
 
-log "Настройка TTS сервера..."
-if [ ! -f start_tts.sh ]; then
-  echo '#!/bin/bash' > start_tts.sh
-  echo 'source .venv/bin/activate' >> start_tts.sh
-  echo 'uvicorn server:app --host 0.0.0.0 --port 5000' >> start_tts.sh
-  chmod +x start_tts.sh
+log "Запуск сервера ZonosJS на порту 5050..."
+if lsof -i :5050 > /dev/null; then
+  log "Порт 5050 уже занят. Пожалуйста, освободите порт или выберите другой."
+  exit 1
 fi
 
-if ! lsof -i :5000 > /dev/null; then
-  log "Запускаем TTS сервер в фоне..."
-  nohup ./start_tts.sh > tts.log 2>&1 &
-  sleep 5
-else
-  log "TTS сервер уже работает на порту 5000"
+log "Запускаем сервер ZonosJS в фоне на порту 5050..."
+nohup npx zonosjs serve --port 5050 > zonosjs.log 2>&1 &
+SERVER_PID=$!
+
+# Параметры ожидания
+MAX_WAIT=60
+WAIT_INTERVAL=2
+elapsed=0
+
+# Цикл проверки состояния сервера
+while [ $elapsed -lt $MAX_WAIT ]; do
+  if grep -q "Uvicorn running on http://0.0.0.0:5050" zonosjs.log; then
+    log "Сервер ZonosJS успешно запущен на порту 5050."
+    break
+  elif grep -q "ERROR" zonosjs.log || grep -q "address already in use" zonosjs.log; then
+    log "Обнаружена ошибка при запуске сервера. Проверьте zonosjs.log"
+    kill $SERVER_PID
+    exit 1
+  fi
+  sleep $WAIT_INTERVAL
+  elapsed=$((elapsed + WAIT_INTERVAL))
+done
+
+if [ $elapsed -ge $MAX_WAIT ]; then
+  log "Сервер ZonosJS не запустился за $MAX_WAIT секунд. Проверьте zonosjs.log"
+  kill $SERVER_PID
+  exit 1
 fi
 
-log "Настройка завершена!"
+log "Настройка завершена! Запустите ассистента командой: node index.js"

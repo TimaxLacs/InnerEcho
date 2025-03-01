@@ -2,7 +2,7 @@
     "type": "module",
     "dependencies": {
         "@langchain/community": "^0.3.30",
-        "@langchain/core": "^0.3.40",
+        "@langchain/core": "^0.3.42",
         "@langchain/deepseek": "^0.0.1",
         "@langchain/langgraph": "^0.2.46",
         "@langchain/ollama": "^0.2.0",
@@ -19,9 +19,10 @@
         "request": "^2.88.2",
         "sound-play": "^1.1.0",
         "wav-decoder": "^1.3.0",
-        "wav-encoder": "^1.3.0"
+        "wav-encoder": "^1.3.0",
+        "zonosjs": "^1.0.6"
     },
-    "name": "mirror-of-voice",
+    "name": "InnerEcho",
     "version": "0.0.1",
     "description": "test",
     "main": "index.js",
@@ -30,12 +31,12 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/TimaxLacs/mirror-of-voice.git"
+        "url": "git+https://github.com/TimaxLacs/InnerEcho.git"
     },
     "author": "",
     "license": "MIT",
     "bugs": {
-        "url": "https://github.com/TimaxLacs/mirror-of-voice/issues"
+        "url": "https://github.com/TimaxLacs/InnerEcho/issues"
     },
-    "homepage": "https://github.com/TimaxLacs/mirror-of-voice#readme"
+    "homepage": "https://github.com/TimaxLacs/InnerEcho#readme"
 }
