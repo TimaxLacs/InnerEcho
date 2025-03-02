@@ -2,6 +2,7 @@ import { Transform } from 'node:stream';
 import mic from 'mic';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'url';
 import play from 'play-sound';
 import { nodewhisper } from 'nodejs-whisper';
 import { ChatOllama } from "@langchain/ollama";
@@ -12,7 +13,6 @@ import { DynamicTool } from "@langchain/core/tools";
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import ZonosJS from 'zonosjs';
-import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execAsync = promisify(exec);
@@ -21,6 +21,84 @@ const SAMPLE_RATE = 16000;
 const SILENCE_TIMEOUT = 2000;
 const player = play({ players: ['mpg123'] });
 const zonosClient = new ZonosJS();
+
+// Получение списка аудиоустройств
+async function getAudioDevices() {
+  try {
+    const { stdout } = await execAsync('ffmpeg -f alsa -list_devices true -i dummy 2>&1');
+    const lines = stdout.split('\n');
+    const inputs = [];
+    const outputs = [];
+    lines.forEach(line => {
+      if (line.includes('[ALSA]') && line.includes('input')) {
+        inputs.push(line.trim());
+      } else if (line.includes('[ALSA]') && line.includes('output')) {
+        outputs.push(line.trim());
+      }
+    });
+    return { inputs, outputs };
+  } catch (err) {
+    console.error('Ошибка получения списка устройств:', err);
+    return { inputs: ['default'], outputs: ['default'] };
+  }
+}
+
+// Тестирование микрофона
+async function testMicrophone(device = 'default') {
+  console.log(`Тестируем микрофон: ${device}`);
+  const micInstance = mic({
+    rate: String(SAMPLE_RATE),
+    channels: '1',
+    device,
+    format: 'S16_LE',
+    debug: false,
+    exitOnSilence: 0
+  });
+
+  const audioChunks = [];
+  const vad = createVoiceDetector();
+  const audioStream = micInstance.getAudioStream();
+
+  audioStream.pipe(vad).on('data', chunk => audioChunks.push(chunk));
+
+  vad.on('silence', () => micInstance.stop());
+  audioStream.on('startComplete', () => console.log('Запись началась...'));
+  audioStream.on('stopComplete', async () => {
+    const audioBuffer = Buffer.concat(audioChunks);
+    const testFile = path.join(__dirname, 'test_mic.wav');
+    await fs.writeFile(testFile, audioBuffer);
+    console.log(`Запись завершена, файл сохранён: ${testFile}`);
+    await player.play(testFile, err => {
+      if (err) console.error('Ошибка воспроизведения теста:', err);
+      else console.log('Тест микрофона завершён');
+    });
+  });
+
+  micInstance.start();
+  await new Promise(resolve => setTimeout(resolve, 5000)); // Запись 5 секунд
+  micInstance.stop();
+}
+
+// Настройка аудиоустройств
+async function setupAudio() {
+  const { inputs, outputs } = await getAudioDevices();
+  console.log('Доступные микрофоны:', inputs);
+  console.log('Доступные динамики:', outputs);
+
+  // Выбор микрофона (по умолчанию первый или 'default')
+  const selectedMic = inputs.length > 0 ? inputs[0].split(' ')[0] : 'default';
+  console.log(`Выбран микрофон: ${selectedMic}`);
+  await testMicrophone(selectedMic);
+
+  // Выбор динамика (по умолчанию 'default')
+  const selectedSpeaker = outputs.length > 0 ? outputs[0].split(' ')[0] : 'default';
+  console.log(`Выбран динамик: ${selectedSpeaker}`);
+  // Тест воспроизведения через play-sound не требует явного указания устройства,
+  // так как mpg123 использует системный вывод по умолчанию
+
+  return { micDevice: selectedMic, speakerDevice: selectedSpeaker };
+}
+
 
 // Кастомный инструмент для агента (заглушка)
 const customTool = new DynamicTool({
@@ -54,6 +132,7 @@ async function setupAgent() {
 }
 
 
+// Детектор активности голоса (VAD)
 function createVoiceDetector() {
   let silenceTimer = null;
   const vad = new Transform({
@@ -61,13 +140,9 @@ function createVoiceDetector() {
       const energy = calculateEnergy(chunk);
       if (energy > 0.0005) {
         if (silenceTimer) clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(() => {
-          vad.emit('silence');
-        }, SILENCE_TIMEOUT);
+        silenceTimer = setTimeout(() => vad.emit('silence'), SILENCE_TIMEOUT);
       } else if (!silenceTimer) {
-        silenceTimer = setTimeout(() => {
-          vad.emit('silence');
-        }, SILENCE_TIMEOUT);
+        silenceTimer = setTimeout(() => vad.emit('silence'), SILENCE_TIMEOUT);
       }
       this.push(chunk);
       callback();
@@ -85,13 +160,13 @@ function createVoiceDetector() {
   return vad;
 }
 
-
-async function listen() {
+// Слушаем микрофон
+async function listen(micDevice = 'default') {
   return new Promise((resolve, reject) => {
     const micInstance = mic({
       rate: String(SAMPLE_RATE),
       channels: '1',
-      device: 'default',
+      device: micDevice,
       format: 'S16_LE',
       debug: false,
       exitOnSilence: 0
@@ -122,17 +197,15 @@ async function listen() {
   });
 }
 
-
+// Конвертация аудио в WAV
 async function convertToWav(audioInput) {
-  const tempOutputFile = path.join(process.cwd(), `converted_${Date.now()}.wav`);
+  const tempOutputFile = path.join(__dirname, `converted_${Date.now()}.wav`);
   let ffmpegCommand;
 
   if (typeof audioInput === 'string') {
-    // Если входной параметр — путь к файлу
     ffmpegCommand = `ffmpeg -i "${audioInput}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
   } else {
-    // Если входной параметр — буфер
-    const tempInputFile = path.join(process.cwd(), `raw_${Date.now()}.pcm`);
+    const tempInputFile = path.join(__dirname, `raw_${Date.now()}.pcm`);
     await fs.writeFile(tempInputFile, audioInput);
     ffmpegCommand = `ffmpeg -f s16le -ar ${SAMPLE_RATE} -ac 1 -i "${tempInputFile}" -ar 16000 -ac 1 -f wav "${tempOutputFile}" -y`;
     await execAsync(ffmpegCommand);
@@ -142,12 +215,10 @@ async function convertToWav(audioInput) {
 
   try {
     await execAsync(ffmpegCommand);
-    // Проверяем длительность файла
     const durationCheck = await execAsync(`ffprobe -i "${tempOutputFile}" -show_entries format=duration -v quiet -of csv="p=0"`);
     const duration = parseFloat(durationCheck.stdout);
     if (duration < 1) {
-      // Добавляем 1 секунду тишины в конец, если файл короче 1 секунды
-      const paddedFile = path.join(process.cwd(), `padded_${Date.now()}.wav`);
+      const paddedFile = path.join(__dirname, `padded_${Date.now()}.wav`);
       await execAsync(`ffmpeg -i "${tempOutputFile}" -af "apad=pad_dur=1" -ar 16000 -ac 1 "${paddedFile}" -y`);
       await fs.unlink(tempOutputFile);
       return paddedFile;
@@ -158,6 +229,7 @@ async function convertToWav(audioInput) {
     throw err;
   }
 }
+
 
 async function transcribe(audioBuffer) {
   const wavFile = await convertToWav(audioBuffer);
@@ -231,14 +303,17 @@ async function voice(text) {
 
 async function mainLoop() {
   await setupAgent();
+  const audioSetup = await setupAudio();
+  const micDevice = audioSetup.micDevice;
+
   while (true) {
     try {
-      const audio = await listen();
-      // const audio = "/workspace/InnerEcho/reference.wav";
+      // const audio = await listen();
+      const audio = "/workspace/InnerEcho/reference.wav";
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
-      const response = await brainAppeal(text);
-      // const response = "привет"
+      // const response = await brainAppeal(text);
+      const response = "привет"
       console.log('Ответ AI:', response);
       await voice(response);
       await new Promise(resolve => setTimeout(resolve, 500));

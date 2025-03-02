@@ -10,7 +10,7 @@ log() { echo -e "${GREEN}[INFO]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 log "Установка системных зависимостей"
-sudo apt update && sudo apt install -y ffmpeg mpg123 curl git python3 python3-venv python3-pip
+sudo apt update && sudo apt install -y ffmpeg mpg123 curl git python3 python3-venv python3-pip alsa-utils
 
 log "Установка Node.js (если не установлен)"
 if ! command -v node &> /dev/null; then
