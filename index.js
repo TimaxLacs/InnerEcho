@@ -269,11 +269,41 @@ async function brainAppeal(text) {
   return response.content;
 }
 
+// Добавим новую функцию для работы с файлом накопления голоса
+async function appendToVoiceReference(audioBuffer) {
+  const voiceHistoryFile = path.join(__dirname, 'voice_history.wav');
+  
+  try {
+    // Конвертируем новую запись в WAV
+    const newRecordingWav = await convertToWav(audioBuffer);
+    
+    // Если файл истории не существует, просто копируем новую запись
+    if (!await fs.access(voiceHistoryFile).then(() => true).catch(() => false)) {
+      await fs.copyFile(newRecordingWav, voiceHistoryFile);
+    } else {
+      // Объединяем существующую историю с новой записью
+      const tempFile = path.join(__dirname, `temp_${Date.now()}.wav`);
+      await execAsync(`ffmpeg -i "concat:${voiceHistoryFile}|${newRecordingWav}" -acodec copy "${tempFile}"`);
+      await fs.rename(tempFile, voiceHistoryFile);
+    }
+    
+    // Очищаем временный файл
+    await fs.unlink(newRecordingWav).catch(() => {});
+    
+  } catch (error) {
+    console.error('Ошибка при обновлении истории голоса:', error);
+  }
+}
+
+// Обновляем функцию voice для использования накопленной истории голоса
 async function voice(text) {
   console.log('Начинаем генерацию речи для текста:', text);
   try {
     console.log('Отправляем запрос к ZonosJS...');
-    const audioBuffer = await zonosClient.generateSpeech(text, './reference.wav', 'ru');
+    const voiceHistoryFile = path.join(__dirname, 'voice_history.wav');
+    
+    // Используем накопленную историю голоса вместо одиночного reference.wav
+    const audioBuffer = await zonosClient.generateSpeech(text, voiceHistoryFile, 'ru');
     console.log('Аудио получено, размер буфера:', audioBuffer.length);
 
     const audioDir = path.join(__dirname, 'audio');
@@ -301,6 +331,7 @@ async function voice(text) {
   }
 }
 
+// Обновляем mainLoop для добавления новых записей в историю голоса
 async function mainLoop() {
   await setupAgent();
   const audioSetup = await setupAudio();
@@ -308,12 +339,13 @@ async function mainLoop() {
 
   while (true) {
     try {
-      // const audio = await listen();
-      const audio = "/workspace/InnerEcho/reference.wav";
+      const audio = await listen();
+      // Добавляем новую запись в историю голоса
+      await appendToVoiceReference(audio);
+      
       const text = await transcribe(audio);
       console.log('Транскрипция:', text);
-      // const response = await brainAppeal(text);
-      const response = "привет"
+      const response = await brainAppeal(text);
       console.log('Ответ AI:', response);
       await voice(response);
       await new Promise(resolve => setTimeout(resolve, 500));
