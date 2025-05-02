@@ -13,6 +13,29 @@ import { DynamicTool } from "@langchain/core/tools";
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import ZonosJS from 'zonosjs';
+import { spawn } from 'child_process';
+import dotenv from 'dotenv';
+import fetch from 'node-fetch';
+import FormData from 'form-data';
+
+// Загрузка переменных окружения
+const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '.env');
+dotenv.config({ path: envPath });
+
+// Проверка обязательных переменных окружения
+const requiredEnvVars = [
+  'OPEN_INTERPRETER_API_URL',
+  'OPEN_INTERPRETER_API_KEY',
+  'OPEN_INTERPRETER_MODEL',
+  'DEEP_API_URL',
+  'DEEP_TOKEN'
+];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`Ошибка: переменная окружения ${envVar} не установлена в .env файле`);
+    process.exit(1);
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execAsync = promisify(exec);
@@ -232,96 +255,192 @@ async function convertToWav(audioInput) {
 
 
 async function transcribe(audioBuffer) {
-  const wavFile = await convertToWav(audioBuffer);
-  const textFile = `${wavFile}.txt`;
   try {
-    const result = await nodewhisper(wavFile, {
-      modelName: 'base',
-      autoDownloadModelName: 'base',
-      removeWavFileAfterTranscription: true,
-      whisperOptions: {
-        outputInText: true,
-        language: 'ru',
+    const formData = new FormData();
+    formData.append("file", audioBuffer, "audio.wav");
+    formData.append("model", "whisper-1");
+    formData.append("language", "RU");
+
+    const response = await fetch(`${process.env.DEEP_API_URL}/audio/transcriptions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.DEEP_TOKEN}`,
+        ...formData.getHeaders(),
       },
+      body: formData,
     });
-    if (result.text) return result.text;
-    const transcribedText = await fs.readFile(textFile, 'utf8');
-    return transcribedText.trim() || "Ошибка: транскрипция не удалась";
+
+    if (!response.ok) {
+      throw new Error(`Ошибка HTTP: ${response.status} ${response.statusText}`);
+    }
+
+    const responseData = await response.json();
+    return responseData.text || "Ошибка: транскрипция не удалась";
   } catch (err) {
     console.error('Ошибка транскрипции:', err);
     return "Ошибка: транскрипция не удалась";
-  } finally {
-    await fs.unlink(textFile).catch(() => {});
   }
 }
 
-// Получение ответа от DeepSeek
+// Функция для взаимодействия с Open Interpreter
 async function brainAppeal(text) {
   if (!text || text === "Ошибка: транскрипция не удалась") {
     return "Извините, не удалось распознать речь.";
   }
-  console.log('Генерируем ответ...');
-  const prompt = [
-    { role: "system", content: "Отвечай кратко и по делу, без лишних рассуждений." },
-    { role: "user", content: text }
-  ];
-  const response = await llm.invoke(prompt);
-  return response.content;
+  console.log('Генерируем ответ через Open Interpreter...');
+  
+  return new Promise((resolve, reject) => {
+    const interpreter = spawn('interpreter', [
+      '--api-base', process.env.OPEN_INTERPRETER_API_URL,
+      '--api-key', process.env.OPEN_INTERPRETER_API_KEY,
+      '--model', process.env.OPEN_INTERPRETER_MODEL,
+      '--os'
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env }
+    });
+    
+    let response = '';
+    let errorOutput = '';
+    let timeout = setTimeout(() => {
+      interpreter.kill();
+      reject(new Error('Таймаут ожидания ответа от Open Interpreter'));
+    }, 30000); // 30 секунд таймаут
+    
+    interpreter.stdout.on('data', (data) => {
+      const output = data.toString();
+      console.log('Open Interpreter:', output);
+      response += output;
+    });
+    
+    interpreter.stderr.on('data', (data) => {
+      const error = data.toString();
+      console.error('Ошибка Open Interpreter:', error);
+      errorOutput += error;
+    });
+    
+    interpreter.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`Open Interpreter завершился с кодом ${code}. Ошибка: ${errorOutput}`));
+      } else {
+        // Очищаем ответ от технических сообщений
+        const cleanResponse = response
+          .replace(/^.*?\[.*?\].*?\n/gm, '') // Удаляем строки с квадратными скобками
+          .replace(/^\s*$/gm, '') // Удаляем пустые строки
+          .trim();
+        resolve(cleanResponse || "Извините, не удалось получить ответ.");
+      }
+    });
+    
+    // Добавляем контекст для более точных ответов
+    const prompt = `Ты - голосовой ассистент, использующий модель ${process.env.OPEN_INTERPRETER_MODEL}. 
+Отвечай кратко и по делу, используя естественный разговорный стиль. 
+Вопрос: ${text}`;
+    interpreter.stdin.write(prompt + '\n');
+    interpreter.stdin.end();
+  });
 }
 
 async function voice(text) {
-  console.log('Начинаем генерацию речи для текста:', text);
   try {
-    console.log('Отправляем запрос к ZonosJS...');
-    const audioBuffer = await zonosClient.generateSpeech(text, './reference.wav', 'ru');
-    console.log('Аудио получено, размер буфера:', audioBuffer.length);
+    const requestBody = {
+      model: 'tts-1',
+      input: text,
+      voice: 'alloy'
+    };
 
+    const response = await fetch(`${process.env.DEEP_API_URL}/audio/speech`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.DEEP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Ошибка HTTP: ${response.status} ${response.statusText} - ${JSON.stringify(errorData)}`);
+    }
+
+    const audioBuffer = await response.buffer();
     const audioDir = path.join(__dirname, 'audio');
-    await fs.mkdir(audioDir, { recursive: true }).catch(() => {}); 
+    await fs.mkdir(audioDir, { recursive: true }).catch(() => {});
 
-    const outputFile = path.join(audioDir, `response_${Date.now()}.wav`);
-    console.log('Сохраняем файл:', outputFile);
+    const outputFile = path.join(audioDir, `response_${Date.now()}.mp3`);
     await fs.writeFile(outputFile, audioBuffer);
-    console.log('Файл сохранён');
 
-    console.log('Воспроизводим аудио...');
     await new Promise((resolve, reject) => {
       player.play(outputFile, (err) => {
         if (err) {
           console.error('Ошибка воспроизведения:', err);
           reject(err);
         } else {
-          console.log('Воспроизведение завершено');
           resolve();
         }
       });
     });
+
+    const tokenCost = response.headers.get('X-Token-Cost');
+    if (tokenCost) {
+      console.log(`[TTS] Использовано токенов: ${tokenCost}`);
+    }
   } catch (error) {
     console.error('Ошибка в voice:', error.message);
   }
 }
 
 async function mainLoop() {
-  await setupAgent();
-  const audioSetup = await setupAudio();
-  const micDevice = audioSetup.micDevice;
+  try {
+    const audioSetup = await setupAudio();
+    const micDevice = audioSetup.micDevice;
 
-  while (true) {
-    try {
-      // const audio = await listen();
-      const audio = "/workspace/InnerEcho/reference.wav";
-      const text = await transcribe(audio);
-      console.log('Транскрипция:', text);
-      // const response = await brainAppeal(text);
-      const response = "привет"
-      console.log('Ответ AI:', response);
-      await voice(response);
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (err) {
-      console.error('Ошибка в главном цикле:', err);
-      await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log('Ассистент готов к работе!');
+    console.log('Нажмите Ctrl+C для выхода');
+    console.log('Используемые настройки:');
+    console.log(`- Open Interpreter URL: ${process.env.OPEN_INTERPRETER_API_URL}`);
+    console.log(`- Open Interpreter модель: ${process.env.OPEN_INTERPRETER_MODEL}`);
+    console.log(`- ZonosJS порт: ${process.env.ZONOSJS_PORT || 5050}`);
+
+    while (true) {
+      try {
+        const audio = await listen(micDevice);
+        const text = await transcribe(audio);
+        console.log('Распознанный текст:', text);
+        
+        const response = await brainAppeal(text);
+        console.log('Ответ:', response);
+        
+        await voice(response);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } catch (err) {
+        console.error('Ошибка в главном цикле:', err);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
+  } catch (err) {
+    console.error('Критическая ошибка:', err);
+    process.exit(1);
   }
 }
+
+// Обработка завершения процесса
+process.on('SIGINT', async () => {
+  console.log('\nЗавершение работы...');
+  try {
+    await execAsync('pkill -f "npx zonosjs serve"');
+    process.exit(0);
+  } catch (err) {
+    console.error('Ошибка при завершении:', err);
+    process.exit(1);
+  }
+});
+
+// Обработка необработанных исключений
+process.on('uncaughtException', (err) => {
+  console.error('Необработанное исключение:', err);
+  process.exit(1);
+});
 
 mainLoop().catch(console.error);

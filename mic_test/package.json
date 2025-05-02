@@ -1,0 +1,13 @@
+{
+  "name": "mic-test",
+  "version": "1.0.0",
+  "description": "Тестирование микрофона с постоянной транскрипцией",
+  "main": "continuous_mic.js",
+  "scripts": {
+    "start": "node continuous_mic.js"
+  },
+  "dependencies": {
+    "mic": "^2.1.2",
+    "vosk": "^0.3.0"
+  }
+} 
